@@ -58,6 +58,22 @@ class ChatResponse(BaseModel):
     sources: list[dict]
 
 
+def _log_chat(
+    question: str, answer: str | None = None, error: str | None = None
+) -> None:
+    """Best-effort persistence of a chat Q&A to the chat_logs table. Never
+    raises — a logging failure must not turn a successful (or already-failed)
+    chat request into a 500."""
+    try:
+        with get_conn() as conn:
+            conn.execute(
+                "INSERT INTO chat_logs (question, answer, error) VALUES (%s, %s, %s)",
+                (question, answer, error),
+            )
+    except Exception:
+        logger.exception("failed to write chat log")
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
     if not req.question.strip():
@@ -67,9 +83,11 @@ def chat(req: ChatRequest):
     try:
         result = answer_question(req.question, owner_name=settings.owner_name)
         logger.info("chat answered, %d sources", len(result["sources"]))
+        _log_chat(req.question, answer=result["answer"])
         return result
     except AnswerGenerationError as e:
         logger.error("chat failed: %s", e)
+        _log_chat(req.question, error=str(e))
         raise HTTPException(502, "failed to generate an answer") from e
 
 

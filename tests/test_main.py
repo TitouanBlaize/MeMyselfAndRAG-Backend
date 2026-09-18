@@ -9,14 +9,21 @@ def test_health(client):
     assert resp.json() == {"status": "ok"}
 
 
-def test_chat_happy_path(client, monkeypatch):
+def test_chat_happy_path(client, monkeypatch, fake_conn, make_get_conn):
     monkeypatch.setattr(
         "app.main.answer_question",
         lambda question, owner_name=None: {"answer": "42", "sources": []},
     )
+    monkeypatch.setattr("app.main.get_conn", make_get_conn(fake_conn))
+
     resp = client.post("/chat", json={"question": "What is it?"})
+
     assert resp.status_code == 200
     assert resp.json() == {"answer": "42", "sources": []}
+    fake_conn.execute.assert_called_once_with(
+        "INSERT INTO chat_logs (question, answer, error) VALUES (%s, %s, %s)",
+        ("What is it?", "42", None),
+    )
 
 
 def test_chat_empty_question_returns_400(client):
@@ -24,13 +31,22 @@ def test_chat_empty_question_returns_400(client):
     assert resp.status_code == 400
 
 
-def test_chat_upstream_failure_returns_502(client, monkeypatch):
+def test_chat_upstream_failure_returns_502(
+    client, monkeypatch, fake_conn, make_get_conn
+):
     def raise_error(question, owner_name=None):
         raise AnswerGenerationError("boom")
 
     monkeypatch.setattr("app.main.answer_question", raise_error)
+    monkeypatch.setattr("app.main.get_conn", make_get_conn(fake_conn))
+
     resp = client.post("/chat", json={"question": "hi"})
+
     assert resp.status_code == 502
+    fake_conn.execute.assert_called_once_with(
+        "INSERT INTO chat_logs (question, answer, error) VALUES (%s, %s, %s)",
+        ("hi", None, "boom"),
+    )
 
 
 def test_chat_unexpected_failure_returns_500_without_leaking_detail(
@@ -44,6 +60,23 @@ def test_chat_unexpected_failure_returns_500_without_leaking_detail(
     assert resp.status_code == 500
     assert resp.json() == {"detail": "internal server error"}
     assert "something broke internally" not in resp.text
+
+
+def test_chat_logging_failure_does_not_break_response(client, monkeypatch):
+    monkeypatch.setattr(
+        "app.main.answer_question",
+        lambda question, owner_name=None: {"answer": "42", "sources": []},
+    )
+
+    def broken_get_conn():
+        raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr("app.main.get_conn", broken_get_conn)
+
+    resp = client.post("/chat", json={"question": "What is it?"})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"answer": "42", "sources": []}
 
 
 def test_ingest_text_missing_api_key_header_is_422(client):
