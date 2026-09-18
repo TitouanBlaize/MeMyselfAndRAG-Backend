@@ -67,3 +67,15 @@ def init_db():
             )
             """
         )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_logs (
+                id BIGSERIAL PRIMARY KEY,
+                question TEXT NOT NULL,
+                answer TEXT,
+                error TEXT,
+                created_at TIMESTAMPTZ DEFAULT now()
+            )
+            """
+        )
