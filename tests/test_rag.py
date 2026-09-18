@@ -41,7 +41,7 @@ def test_answer_question_uses_passed_owner_name(monkeypatch, fake_conn, make_get
     result = answer_question("What did they study?", owner_name="Titouan")
 
     system_prompt = fake_claude.messages.create.call_args.kwargs["system"]
-    assert "about Titouan" in system_prompt
+    assert "sur Titouan" in system_prompt
     assert "the site owner" not in system_prompt
     assert result["answer"] == "Titouan studied computer science."
 

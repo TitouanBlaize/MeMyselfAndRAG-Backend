@@ -11,11 +11,11 @@ class AnswerGenerationError(RuntimeError):
     """Raised when the Claude API call fails."""
 
 
-SYSTEM_PROMPT = """You are an assistant answering questions about {owner} \
-using only the provided context excerpts from their resume, thesis, and \
-papers. If the context doesn't contain the answer, say so honestly instead \
-of guessing. Keep answers concise and speak about {owner} in the third \
-person."""
+SYSTEM_PROMPT = """Tu es un assistant répondant aux questions sur {owner} \
+en utilisant uniquement les extraits de contexte fournis de leur cv, thèse et \
+articles. Si le contexte ne contient pas la réponse, dites-le honnêtement plutôt \
+que de deviner. Gardez les réponses concises et parlez de {owner} à la première \
+personne."""
 
 
 def retrieve(query: str, top_k: int | None = None) -> list[dict]:
