@@ -1,3 +1,5 @@
+from collections.abc import Iterator
+
 import anthropic
 
 from app.config import settings
@@ -36,7 +38,10 @@ def retrieve(query: str, top_k: int | None = None) -> list[dict]:
     return [{"content": r[0], "source": r[1], "similarity": r[2]} for r in rows]
 
 
-def answer_question(query: str, owner_name: str = "the site owner") -> dict:
+def _build_request(query: str, owner_name: str) -> tuple[list[dict], dict]:
+    """Retrieves context for `query` and returns (chunks, Claude request
+    kwargs). Shared by the blocking and streaming paths so both send
+    exactly the same prompt."""
     chunks = retrieve(query)
 
     if not chunks:
@@ -46,18 +51,29 @@ def answer_question(query: str, owner_name: str = "the site owner") -> dict:
             f"[Source: {c['source']}]\n{c['content']}" for c in chunks
         )
 
+    request = {
+        "model": settings.claude_model,
+        "max_tokens": 1024,
+        "system": SYSTEM_PROMPT.format(owner=owner_name),
+        "messages": [
+            {
+                "role": "user",
+                "content": f"Context:\n{context}\n\nQuestion: {query}",
+            }
+        ],
+    }
+    return chunks, request
+
+
+def _sources(chunks: list[dict]) -> list[dict]:
+    return [{"source": c["source"], "similarity": c["similarity"]} for c in chunks]
+
+
+def answer_question(query: str, owner_name: str = "the site owner") -> dict:
+    chunks, request = _build_request(query, owner_name)
+
     try:
-        message = _claude.messages.create(
-            model=settings.claude_model,
-            max_tokens=1024,
-            system=SYSTEM_PROMPT.format(owner=owner_name),
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"Context:\n{context}\n\nQuestion: {query}",
-                }
-            ],
-        )
+        message = _claude.messages.create(**request)
     except Exception as e:
         raise AnswerGenerationError("failed to generate an answer") from e
 
@@ -65,9 +81,23 @@ def answer_question(query: str, owner_name: str = "the site owner") -> dict:
         block.text for block in message.content if block.type == "text"
     )
 
-    return {
-        "answer": answer_text,
-        "sources": [
-            {"source": c["source"], "similarity": c["similarity"]} for c in chunks
-        ],
-    }
+    return {"answer": answer_text, "sources": _sources(chunks)}
+
+
+def stream_answer(
+    query: str, owner_name: str = "the site owner"
+) -> tuple[list[dict], Iterator[str]]:
+    """Streaming variant of answer_question(). Retrieval runs eagerly, so
+    embedding/DB failures raise here, before any response bytes are sent.
+    Returns (sources, text_chunks); iterating text_chunks drives the Claude
+    call and raises AnswerGenerationError if it fails, possibly mid-answer."""
+    chunks, request = _build_request(query, owner_name)
+
+    def _text_chunks() -> Iterator[str]:
+        try:
+            with _claude.messages.stream(**request) as stream:
+                yield from stream.text_stream
+        except Exception as e:
+            raise AnswerGenerationError("failed to generate an answer") from e
+
+    return _sources(chunks), _text_chunks()

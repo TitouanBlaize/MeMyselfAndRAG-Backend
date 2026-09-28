@@ -1,9 +1,10 @@
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-from app.rag import AnswerGenerationError, answer_question, retrieve
+from app.rag import AnswerGenerationError, answer_question, retrieve, stream_answer
 
 
 def _fake_message(text):
@@ -76,3 +77,61 @@ def test_answer_question_wraps_claude_errors(monkeypatch, fake_conn, make_get_co
 
     with pytest.raises(AnswerGenerationError):
         answer_question("anything")
+
+
+def _fake_stream(pieces, fail_after=None):
+    """Stand-in for `_claude.messages.stream(...)`: a context manager whose
+    .text_stream yields `pieces`, optionally raising after `fail_after` of
+    them to simulate the API dropping mid-answer."""
+
+    @contextmanager
+    def _stream(**kwargs):
+        def _text():
+            for i, piece in enumerate(pieces):
+                if fail_after is not None and i == fail_after:
+                    raise RuntimeError("connection reset")
+                yield piece
+
+        yield SimpleNamespace(text_stream=_text())
+
+    return _stream
+
+
+def test_stream_answer_yields_text_and_sources(monkeypatch, fake_conn, make_get_conn):
+    fake_conn.execute.return_value.fetchall.return_value = [
+        ("Titouan studied CS.", "resume.md", 0.9),
+    ]
+    monkeypatch.setattr("app.rag.get_conn", make_get_conn(fake_conn))
+    monkeypatch.setattr("app.rag.embed_query", lambda q: [0.1])
+
+    fake_claude = MagicMock()
+    fake_claude.messages.stream = MagicMock(
+        side_effect=_fake_stream(["J'ai ", "étudié ", "l'info."])
+    )
+    monkeypatch.setattr("app.rag._claude", fake_claude)
+
+    sources, text_chunks = stream_answer("What did they study?", owner_name="Titouan")
+
+    assert sources == [{"source": "resume.md", "similarity": 0.9}]
+    # Claude isn't called until the text iterator is consumed.
+    fake_claude.messages.stream.assert_not_called()
+    assert list(text_chunks) == ["J'ai ", "étudié ", "l'info."]
+    assert "sur Titouan" in fake_claude.messages.stream.call_args.kwargs["system"]
+
+
+def test_stream_answer_wraps_mid_stream_errors(monkeypatch, fake_conn, make_get_conn):
+    fake_conn.execute.return_value.fetchall.return_value = []
+    monkeypatch.setattr("app.rag.get_conn", make_get_conn(fake_conn))
+    monkeypatch.setattr("app.rag.embed_query", lambda q: [0.1])
+
+    fake_claude = MagicMock()
+    fake_claude.messages.stream = MagicMock(
+        side_effect=_fake_stream(["partial ", "never"], fail_after=1)
+    )
+    monkeypatch.setattr("app.rag._claude", fake_claude)
+
+    _, text_chunks = stream_answer("anything")
+
+    assert next(text_chunks) == "partial "
+    with pytest.raises(AnswerGenerationError):
+        next(text_chunks)

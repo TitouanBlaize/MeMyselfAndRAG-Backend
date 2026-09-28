@@ -1,10 +1,11 @@
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from app.auto_ingest import auto_ingest_qa_file
@@ -13,7 +14,7 @@ from app.config import settings
 from app.db import get_conn, init_db
 from app.deps import require_api_key
 from app.embeddings import EmbeddingError, embed_documents
-from app.rag import AnswerGenerationError, answer_question
+from app.rag import AnswerGenerationError, answer_question, stream_answer
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -89,6 +90,49 @@ def chat(req: ChatRequest):
         logger.error("chat failed: %s", e)
         _log_chat(req.question, error=str(e))
         raise HTTPException(502, "failed to generate an answer") from e
+
+
+def _sse(event: str, data) -> str:
+    """Formats one Server-Sent Event. Data is JSON-encoded so newlines in
+    the answer text can't break the SSE framing."""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@app.post("/chat/stream")
+def chat_stream(req: ChatRequest):
+    """Same as /chat, but streams the answer as Server-Sent Events:
+    one `sources` event, then `delta` events ({"text": ...}) as Claude
+    generates, then `done` — or `error` if generation fails mid-stream
+    (the HTTP status is already 200 by then, so the error is in-band)."""
+    if not req.question.strip():
+        raise HTTPException(400, "question must not be empty")
+
+    logger.info("chat stream question received: %r", req.question)
+    sources, text_chunks = stream_answer(req.question, owner_name=settings.owner_name)
+
+    def events():
+        yield _sse("sources", sources)
+        parts: list[str] = []
+        try:
+            for text in text_chunks:
+                parts.append(text)
+                yield _sse("delta", {"text": text})
+        except AnswerGenerationError as e:
+            logger.error("chat stream failed: %s", e)
+            _log_chat(req.question, answer="".join(parts) or None, error=str(e))
+            yield _sse("error", {"detail": "failed to generate an answer"})
+            return
+
+        logger.info("chat stream answered, %d sources", len(sources))
+        _log_chat(req.question, answer="".join(parts))
+        yield _sse("done", {})
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        # Stop proxies (Render, nginx) from buffering the stream into one blob.
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 class IngestTextRequest(BaseModel):

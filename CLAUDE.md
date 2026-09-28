@@ -21,7 +21,7 @@ Or `docker compose up --build` — runs the app plus a `pgvector/pgvector` Postg
 - `chunking.py` — `chunk_markdown_qa()` splits on top-level `# ` headings only (`##`/`###` inside an answer do NOT split); each chunk = one question+answer together
 - `embeddings.py` — VoyageAI; `embed_documents()` uses `input_type="document"`, `embed_query()` uses `input_type="query"` (asymmetric — don't mix them up); raises `EmbeddingError` on failure
 - `db.py` — `init_db()` creates the `vector` extension + `documents`/`ingested_sources` tables; runs on every startup, safe to call repeatedly
-- `rag.py` — retrieval (cosine distance via `<=>`) + Claude call; raises `AnswerGenerationError` on failure
+- `rag.py` — retrieval (cosine distance via `<=>`) + Claude call; raises `AnswerGenerationError` on failure. `answer_question()` backs `/chat`; `stream_answer()` backs `/chat/stream` (SSE) — retrieval runs eagerly, the Claude call only when its text iterator is consumed, so its errors surface mid-stream as an in-band `error` event
 - `auto_ingest.py` — re-ingests `settings.qa_markdown_path` (default `Titouan.md`) on every startup, but only if its SHA-256 hash changed since last run (tracked in `ingested_sources` table)
 
 ## Gotchas

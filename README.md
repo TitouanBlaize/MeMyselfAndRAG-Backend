@@ -6,6 +6,7 @@ A minimal RAG API: FastAPI + Postgres/pgvector (Render) + Voyage embeddings + Cl
 
 - `GET /health` — liveness check
 - `POST /chat` — `{"question": "..."}` → retrieves relevant chunks, asks Claude, returns `{answer, sources}`
+- `POST /chat/stream` — same input, streams the answer as Server-Sent Events (see "Streaming the answer" below)
 - `POST /ingest/text` — `{"source": "...", "text": "..."}` (header `x-api-key: <INGEST_API_KEY>`) → chunks, embeds, and stores text
 - `DELETE /ingest/{source}` — removes all chunks for a given source (header `x-api-key: <INGEST_API_KEY>`)
 - `GET /documents` — lists stored chunks (header `x-api-key: <INGEST_API_KEY>`); filter with `?source=`, page with `?limit=&offset=`
@@ -96,6 +97,44 @@ const res = await fetch("https://<your-service>.onrender.com/chat", {
   body: JSON.stringify({ question: "What did Antoine study?" }),
 });
 const { answer, sources } = await res.json();
+```
+
+### Streaming the answer
+
+`POST /chat/stream` takes the same body but responds with Server-Sent
+Events, so the answer can be displayed as Claude writes it:
+
+| event     | data                              |
+| --------- | --------------------------------- |
+| `sources` | `[{source, similarity}, ...]` — sent first |
+| `delta`   | `{"text": "..."}` — one per text chunk |
+| `done`    | `{}` — answer complete            |
+| `error`   | `{"detail": "..."}` — generation failed mid-stream (status is already 200) |
+
+`EventSource` only supports GET, so read the body with `fetch`:
+
+```js
+const res = await fetch("https://<your-service>.onrender.com/chat/stream", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ question: "What did Antoine study?" }),
+});
+const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+let buffer = "";
+while (true) {
+  const { value, done } = await reader.read();
+  if (done) break;
+  buffer += value;
+  const events = buffer.split("\n\n");
+  buffer = events.pop(); // keep the incomplete trailing event
+  for (const raw of events) {
+    const event = raw.match(/^event: (.*)$/m)[1];
+    const data = JSON.parse(raw.match(/^data: (.*)$/m)[1]);
+    if (event === "delta") answerEl.textContent += data.text;
+    else if (event === "sources") renderSources(data);
+    else if (event === "error") showError(data.detail);
+  }
+}
 ```
 
 Remember to restrict CORS to your actual frontend domain before going

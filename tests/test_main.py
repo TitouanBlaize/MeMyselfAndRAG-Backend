@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 
 from app.rag import AnswerGenerationError
@@ -77,6 +78,85 @@ def test_chat_logging_failure_does_not_break_response(client, monkeypatch):
 
     assert resp.status_code == 200
     assert resp.json() == {"answer": "42", "sources": []}
+
+
+def _parse_sse(body: str) -> list[tuple[str, object]]:
+    events = []
+    for block in body.strip().split("\n\n"):
+        lines = dict(line.split(": ", 1) for line in block.split("\n"))
+        events.append((lines["event"], json.loads(lines["data"])))
+    return events
+
+
+def _fake_stream_answer(pieces, error_after=None):
+    def _stream_answer(question, owner_name=None):
+        def _text():
+            for i, piece in enumerate(pieces):
+                if error_after is not None and i == error_after:
+                    raise AnswerGenerationError("stream dropped")
+                yield piece
+
+        return [{"source": "a.md", "similarity": 0.5}], _text()
+
+    return _stream_answer
+
+
+def test_chat_stream_happy_path(client, monkeypatch, fake_conn, make_get_conn):
+    monkeypatch.setattr(
+        "app.main.stream_answer", _fake_stream_answer(["Bon", "jour\n", "!"])
+    )
+    monkeypatch.setattr("app.main.get_conn", make_get_conn(fake_conn))
+
+    resp = client.post("/chat/stream", json={"question": "Salut ?"})
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    assert _parse_sse(resp.text) == [
+        ("sources", [{"source": "a.md", "similarity": 0.5}]),
+        ("delta", {"text": "Bon"}),
+        ("delta", {"text": "jour\n"}),
+        ("delta", {"text": "!"}),
+        ("done", {}),
+    ]
+    fake_conn.execute.assert_called_once_with(
+        "INSERT INTO chat_logs (question, answer, error) VALUES (%s, %s, %s)",
+        ("Salut ?", "Bonjour\n!", None),
+    )
+
+
+def test_chat_stream_empty_question_returns_400(client):
+    resp = client.post("/chat/stream", json={"question": "   "})
+    assert resp.status_code == 400
+
+
+def test_chat_stream_mid_stream_failure_sends_error_event(
+    client, monkeypatch, fake_conn, make_get_conn
+):
+    monkeypatch.setattr(
+        "app.main.stream_answer", _fake_stream_answer(["partial", "x"], error_after=1)
+    )
+    monkeypatch.setattr("app.main.get_conn", make_get_conn(fake_conn))
+
+    resp = client.post("/chat/stream", json={"question": "hi"})
+
+    assert resp.status_code == 200
+    events = _parse_sse(resp.text)
+    assert events[-1] == ("error", {"detail": "failed to generate an answer"})
+    assert ("done", {}) not in events
+    fake_conn.execute.assert_called_once_with(
+        "INSERT INTO chat_logs (question, answer, error) VALUES (%s, %s, %s)",
+        ("hi", "partial", "stream dropped"),
+    )
+
+
+def test_chat_stream_retrieval_failure_returns_500(client, monkeypatch):
+    def raise_unexpected(question, owner_name=None):
+        raise RuntimeError("embedding service down")
+
+    monkeypatch.setattr("app.main.stream_answer", raise_unexpected)
+    resp = client.post("/chat/stream", json={"question": "hi"})
+    assert resp.status_code == 500
+    assert resp.json() == {"detail": "internal server error"}
 
 
 def test_ingest_text_missing_api_key_header_is_422(client):
